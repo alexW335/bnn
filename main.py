@@ -96,7 +96,7 @@ def main():
     bsm = BayesianShipmentModel(input_dim = 2, kl_weight=0)
     bsm.fit(X, y, epochs=10)
 
-    n_new = 25
+    n_new = 1000
     newdata = np.tile(np.eye(2), (n_new, 1))
     
     preds = bsm.predict(newdata)
