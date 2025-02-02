@@ -21,22 +21,22 @@ def custom_neg_log_likelihood(y_true, y_pred):
                [sigma1*sigma2*rho, sigma2^2]]
     """
     # unpack predictions
-    p_logit   = y_pred[..., 0:1]   # (batch, 1)
-    lambda_raw= y_pred[..., 1:2]   # (batch, 1)
-    mu_raw    = y_pred[..., 2:4]   # (batch, 2)
-    scale_raw = y_pred[..., 4:6]   # (batch, 2)
-    corr_raw  = y_pred[..., 6:7]   # (batch, 1)
+    p_logit    = y_pred[..., 0:1]   # (batch, 1)
+    lambda_raw = y_pred[..., 1:2]   # (batch, 1)
+    mu_raw     = y_pred[..., 2:4]   # (batch, 2)
+    scale_raw  = y_pred[..., 4:6]   # (batch, 2)
+    corr_raw   = y_pred[..., 6:7]   # (batch, 1)
     
     # transform to valid parameters
-    p       = tf.sigmoid(p_logit)
-    lambda_ = tf.nn.softplus(lambda_raw)
-    count   = p * lambda_  # expected number of shipments
+    p        = tf.sigmoid(p_logit)
+    lambda_  = tf.nn.softplus(lambda_raw)
+    count    = p * lambda_  # expected number of shipments
     
-    mu      = tf.nn.softplus(mu_raw)  # per-shipment mean (ensuring positivity)
-    mean_total = count * mu          # predicted total (for weight and volume)
+    mu       = tf.nn.softplus(mu_raw)  # per-shipment mean (ensuring positivity)
+    mean_total = count * mu            # predicted totals (for weight and volume)
     
-    sigma   = tf.nn.softplus(scale_raw)  # shipment-level std dev's
-    rho     = tf.tanh(corr_raw)          # correlation in (-1,1)
+    sigma    = tf.nn.softplus(scale_raw)  # shipment-level std dev's
+    rho      = tf.tanh(corr_raw)          # correlation in (-1,1)
     
     # build covariance matrix for each sample; shapes: sigma[...,0:1] is (batch,1)
     sigma1 = sigma[..., 0:1]
@@ -68,7 +68,8 @@ class BayesianShipmentModel:
       - shipment value (via a Normal head whose parameters include a covariance
         matrix parameterized via two scales and a correlation)
         
-    The final layer outputs 7 numbers per sample.
+    The final output per sample is a 7-dimensional vector:
+      [p_logit, lambda_raw, mu_raw (2 values), scale_raw (2 values), corr_raw]
     """
     def __init__(self, input_dim: int,
                  hidden_units_shared: list = [32, 16],
@@ -86,37 +87,89 @@ class BayesianShipmentModel:
         return tfd.kl_divergence(q, p) * self.kl_weight
     
     def _build_model(self):
-        prior_fn    = tfp.layers.default_multivariate_normal_fn
-        posterior_fn= tfp.layers.default_mean_field_normal_fn()
+        prior_fn     = tfp.layers.default_multivariate_normal_fn
+        posterior_fn = tfp.layers.default_mean_field_normal_fn()
         
         inputs = tf.keras.Input(shape=(self.input_dim,))
-        x = inputs
         
-        # shared base: extract features
+        # Shared base: extract features common to all heads.
+        x_shared = inputs
         for units in self.hidden_units_shared:
-            x = tfp.layers.DenseFlipout(
-                units, activation='relu',
+            x_shared = tfp.layers.DenseFlipout(
+                units,
+                activation='relu',
                 kernel_prior_fn=prior_fn,
                 kernel_posterior_fn=posterior_fn,
                 kernel_divergence_fn=self._kl_divergence_fn
-            )(x)
+            )(x_shared)
         
-        # head: further process for likelihood parameters
+        # --- Bernoulli head (shipment occurrence) ---
+        bernoulli = x_shared
         for units in self.hidden_units_head:
-            x = tfp.layers.DenseFlipout(
-                units, activation='relu',
+            bernoulli = tfp.layers.DenseFlipout(
+                units,
+                activation='relu',
                 kernel_prior_fn=prior_fn,
                 kernel_posterior_fn=posterior_fn,
                 kernel_divergence_fn=self._kl_divergence_fn
-            )(x)
-        
-        # Final output: 7 parameters
-        outputs = tfp.layers.DenseFlipout(
-            7, activation=None,
+            )(bernoulli)
+        # One output node (logit) for p.
+        p_logit = tfp.layers.DenseFlipout(
+            1,
+            activation=None,
             kernel_prior_fn=prior_fn,
             kernel_posterior_fn=posterior_fn,
             kernel_divergence_fn=self._kl_divergence_fn
-        )(x)
+        )(bernoulli)
+        
+        # --- Poisson head (shipment count) ---
+        poisson = x_shared
+        for units in self.hidden_units_head:
+            poisson = tfp.layers.DenseFlipout(
+                units,
+                activation='relu',
+                kernel_prior_fn=prior_fn,
+                kernel_posterior_fn=posterior_fn,
+                kernel_divergence_fn=self._kl_divergence_fn
+            )(poisson)
+        # One output node for the Poisson rate.
+        lambda_raw = tfp.layers.DenseFlipout(
+            1,
+            activation=None,
+            kernel_prior_fn=prior_fn,
+            kernel_posterior_fn=posterior_fn,
+            kernel_divergence_fn=self._kl_divergence_fn
+        )(poisson)
+        
+        # --- Normal head (shipment value: mean, scale, and correlation) ---
+        normal = x_shared
+        for units in self.hidden_units_head:
+            normal = tfp.layers.DenseFlipout(
+                units,
+                activation='relu',
+                kernel_prior_fn=prior_fn,
+                kernel_posterior_fn=posterior_fn,
+                kernel_divergence_fn=self._kl_divergence_fn
+            )(normal)
+        # This head outputs 5 values:
+        #   - 2 for mu_raw (per-shipment mean for weight and volume),
+        #   - 2 for scale_raw (to be transformed into standard deviations),
+        #   - 1 for corr_raw (to be transformed into a correlation via tanh).
+        normal_params = tfp.layers.DenseFlipout(
+            5,
+            activation=None,
+            kernel_prior_fn=prior_fn,
+            kernel_posterior_fn=posterior_fn,
+            kernel_divergence_fn=self._kl_divergence_fn
+        )(normal)
+        # Split the 5 outputs.
+        mu_raw    = normal_params[..., 0:2]   # indices 0,1
+        scale_raw = normal_params[..., 2:4]   # indices 2,3
+        corr_raw  = normal_params[..., 4:5]   # index 4
+        
+        # --- Concatenate all heads ---
+        # Order: p_logit (1), lambda_raw (1), mu_raw (2), scale_raw (2), corr_raw (1)
+        outputs = tf.keras.layers.Concatenate(axis=-1)([p_logit, lambda_raw, mu_raw, scale_raw, corr_raw])
         
         self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
         self.model.compile(
@@ -131,7 +184,7 @@ class BayesianShipmentModel:
         Parameters
         ----------
         X : array-like
-            Input features (e.g. one-hot encoded product flags) with shape (n_samples, input_dim).
+            Input features (e.g., one-hot encoded product flags) with shape (n_samples, input_dim).
         y : array-like
             Observed totals with shape (n_samples, 2), corresponding to [total_weight, total_volume].
         kwargs : dict
@@ -155,6 +208,7 @@ class BayesianShipmentModel:
         Returns
         -------
         samples : np.ndarray
-            An array of shape (batch_size, 2) with predictive samples for total weight and volume.
+            An array of shape (batch_size, 7) with the predictive parameters.
         """
         return self.model(X, training=True).numpy().astype(np.float64)
+

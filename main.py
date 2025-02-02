@@ -77,7 +77,7 @@ def main():
         cov=np.array([[[0.04, 0.048], [0.048, 0.09]], [[0.06, 0.07], [0.07, 0.09]]])
     )
 
-    data = gen.generate(samples_per_product=5000)
+    data = gen.generate(samples_per_product=1000)
 
     # generate faceted pairplots by product
     generate_pairplots(data)
@@ -93,11 +93,8 @@ def main():
     X = trans_prod.toarray()
     y = data[['weight', 'volume']].to_numpy()
 
-    bsm = BayesianShipmentModel(input_dim = 2)
-    bsm.fit(X, y, epochs=50)
-
-    print(X.shape)
-    print(y.shape)
+    bsm = BayesianShipmentModel(input_dim = 2, kl_weight=0)
+    bsm.fit(X, y, epochs=10)
 
     n_new = 25
     newdata = np.tile(np.eye(2), (n_new, 1))
