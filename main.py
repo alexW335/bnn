@@ -94,7 +94,7 @@ def main():
     y = data[['weight', 'volume']].to_numpy()
 
     bsm = BayesianShipmentModel(input_dim = 2, kl_weight=0)
-    bsm.fit(X, y, epochs=10)
+    bsm.fit(X, y, epochs=100)
 
     n_new = 1000
     newdata = np.tile(np.eye(2), (n_new, 1))

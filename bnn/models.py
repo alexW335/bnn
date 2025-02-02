@@ -136,10 +136,10 @@ class BayesianShipmentModel:
       [p_logit, lambda_raw, mu_raw (2 values), scale_raw (2 values), corr_raw]
     """
     def __init__(self, input_dim: int,
-                 hidden_units_shared: list = [32, 16],
-                 hidden_units_head: list = [16],
+                 hidden_units_shared: list = [64, 32],
+                 hidden_units_head: list = [32],
                  kl_weight: float = 1e-3,
-                 learning_rate: float = 1e-3):
+                 learning_rate: float = 1e-2):
         self.input_dim = input_dim
         self.hidden_units_shared = hidden_units_shared
         self.hidden_units_head = hidden_units_head
