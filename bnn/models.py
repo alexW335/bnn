@@ -4,48 +4,77 @@ import numpy as np
 
 tfd = tfp.distributions
 
+# custom negative log-likelihood loss
+def custom_neg_log_likelihood(y_true, y_pred):
+    """
+    y_pred has shape (batch, 7) with:
+      - [0]: p_logit, transformed via sigmoid -> p in (0,1)
+      - [1]: lambda_raw, transformed via softplus -> lambda > 0
+      - [2:4]: mu_raw for weight and volume, transformed via softplus
+      - [4:6]: scale_raw for covariance, transformed via softplus to get positive scales
+      - [6]: corr_raw, transformed via tanh -> correlation in (-1,1)
+      
+    The predicted mean for the totals is:
+        mean_total = (sigmoid(p_logit) * softplus(lambda_raw)) * softplus(mu_raw)
+    The covariance is built as:
+        cov = [[sigma1^2, sigma1*sigma2*rho],
+               [sigma1*sigma2*rho, sigma2^2]]
+    """
+    # unpack predictions
+    p_logit   = y_pred[..., 0:1]   # (batch, 1)
+    lambda_raw= y_pred[..., 1:2]   # (batch, 1)
+    mu_raw    = y_pred[..., 2:4]   # (batch, 2)
+    scale_raw = y_pred[..., 4:6]   # (batch, 2)
+    corr_raw  = y_pred[..., 6:7]   # (batch, 1)
+    
+    # transform to valid parameters
+    p       = tf.sigmoid(p_logit)
+    lambda_ = tf.nn.softplus(lambda_raw)
+    count   = p * lambda_  # expected number of shipments
+    
+    mu      = tf.nn.softplus(mu_raw)  # per-shipment mean (ensuring positivity)
+    mean_total = count * mu          # predicted total (for weight and volume)
+    
+    sigma   = tf.nn.softplus(scale_raw)  # shipment-level std dev's
+    rho     = tf.tanh(corr_raw)          # correlation in (-1,1)
+    
+    # build covariance matrix for each sample; shapes: sigma[...,0:1] is (batch,1)
+    sigma1 = sigma[..., 0:1]
+    sigma2 = sigma[..., 1:2]
+    cov11  = sigma1 ** 2
+    cov22  = sigma2 ** 2
+    cov12  = sigma1 * sigma2 * rho
+    cov21  = cov12
+    
+    # combine into a covariance matrix of shape (batch, 2, 2)
+    cov_matrix = tf.stack([
+        tf.concat([cov11, cov12], axis=-1),
+        tf.concat([cov21, cov22], axis=-1)
+    ], axis=-2)
+    
+    # define multivariate normal likelihood
+    mvn = tfd.MultivariateNormalFullCovariance(loc=mean_total, covariance_matrix=cov_matrix)
+    
+    # negative log likelihood (nll)
+    nll = -mvn.log_prob(y_true)
+    return tf.reduce_mean(nll)
+
+
 class BayesianShipmentModel:
     """
-    A Bayesian neural network model for day/product shipment totals.
-    
-    Each input is a one-hot encoded vector (or any other features) that identifies a product (or other groups).
-    The model is designed to reflect an underlying generative process:
-      1. A Bernoulli (parameterized by p) governs whether any shipments occur.
-      2. Conditional on shipments occurring, the number of shipments follows a Poisson distribution with mean λ.
-      3. Each shipment's weight and volume is drawn from a multivariate normal with mean μ = [μ_weight, μ_volume].
-    
-    The expected (observed) total weight and volume are given by:
-    
-         E[totals] = (\sigma(p) * softplus(λ)) * softplus(μ)
-    
-    (Here, \sigma is the sigmoid function and softplus is used to ensure positivity.)
-    
-    The network is built using TFP's DenseFlipout layers so that we learn distributions over weights.
-    Monte Carlo prediction (by sampling the network's weights) then provides a predictive distribution.
+    A Bayesian neural network that predicts parameters for a custom likelihood:
+      - shipment occurrence (via a Bernoulli head)
+      - shipment count (via a Poisson head)
+      - shipment value (via a Normal head whose parameters include a covariance
+        matrix parameterized via two scales and a correlation)
+        
+    The final layer outputs 7 numbers per sample.
     """
-    
-    def __init__(
-        self,
-        input_dim: int,
-        hidden_units_shared: list = [32, 16],
-        hidden_units_head: list = [16],
-        kl_weight: float = 1e-3,
-        learning_rate: float = 1e-3
-    ):
-        """
-        Parameters
-        ----------
-        input_dim : int
-            Dimension of the one-hot encoded (or otherwise encoded) input.
-        hidden_units_shared : list, optional
-            List of hidden units for the shared feature extractor.
-        hidden_units_head : list, optional
-            List of hidden units for each of the three heads.
-        kl_weight : float, optional
-            Scaling factor for the KL divergence regularization.
-        learning_rate : float, optional
-            Learning rate for the optimizer.
-        """
+    def __init__(self, input_dim: int,
+                 hidden_units_shared: list = [32, 16],
+                 hidden_units_head: list = [16],
+                 kl_weight: float = 1e-3,
+                 learning_rate: float = 1e-3):
         self.input_dim = input_dim
         self.hidden_units_shared = hidden_units_shared
         self.hidden_units_head = hidden_units_head
@@ -54,96 +83,45 @@ class BayesianShipmentModel:
         self._build_model()
     
     def _kl_divergence_fn(self, q, p, _):
-        """Scale the KL divergence (which TFP will add to the loss) by a factor."""
         return tfd.kl_divergence(q, p) * self.kl_weight
     
     def _build_model(self):
-        prior_fn = tfp.layers.default_multivariate_normal_fn
-        posterior_fn = tfp.layers.default_mean_field_normal_fn()
+        prior_fn    = tfp.layers.default_multivariate_normal_fn
+        posterior_fn= tfp.layers.default_mean_field_normal_fn()
         
         inputs = tf.keras.Input(shape=(self.input_dim,))
-        
-        # Shared base: extract features common to all heads.
         x = inputs
+        
+        # shared base: extract features
         for units in self.hidden_units_shared:
             x = tfp.layers.DenseFlipout(
-                units,
-                activation='relu',
+                units, activation='relu',
                 kernel_prior_fn=prior_fn,
                 kernel_posterior_fn=posterior_fn,
                 kernel_divergence_fn=self._kl_divergence_fn
             )(x)
         
-        # --- Bernoulli head (shipment occurrence) ---
-        bernoulli = x
+        # head: further process for likelihood parameters
         for units in self.hidden_units_head:
-            bernoulli = tfp.layers.DenseFlipout(
-                units,
-                activation='relu',
+            x = tfp.layers.DenseFlipout(
+                units, activation='relu',
                 kernel_prior_fn=prior_fn,
                 kernel_posterior_fn=posterior_fn,
                 kernel_divergence_fn=self._kl_divergence_fn
-            )(bernoulli)
-        # One output node (logit) transformed by a sigmoid.
-        p_logit = tfp.layers.DenseFlipout(
-            1,
-            activation=None,
+            )(x)
+        
+        # Final output: 7 parameters
+        outputs = tfp.layers.DenseFlipout(
+            7, activation=None,
             kernel_prior_fn=prior_fn,
             kernel_posterior_fn=posterior_fn,
             kernel_divergence_fn=self._kl_divergence_fn
-        )(bernoulli)
-        p = tf.keras.layers.Activation('sigmoid', name='p')(p_logit)
+        )(x)
         
-        # --- Poisson head (conditional shipment count) ---
-        poisson = x
-        for units in self.hidden_units_head:
-            poisson = tfp.layers.DenseFlipout(
-                units,
-                activation='relu',
-                kernel_prior_fn=prior_fn,
-                kernel_posterior_fn=posterior_fn,
-                kernel_divergence_fn=self._kl_divergence_fn
-            )(poisson)
-        # One output node transformed with softplus to ensure positivity.
-        lambda_out = tfp.layers.DenseFlipout(
-            1,
-            activation='softplus',
-            kernel_prior_fn=prior_fn,
-            kernel_posterior_fn=posterior_fn,
-            kernel_divergence_fn=self._kl_divergence_fn
-        )(poisson)
-        
-        # --- Normal head (average shipment weight & volume) ---
-        normal = x
-        for units in self.hidden_units_head:
-            normal = tfp.layers.DenseFlipout(
-                units,
-                activation='relu',
-                kernel_prior_fn=prior_fn,
-                kernel_posterior_fn=posterior_fn,
-                kernel_divergence_fn=self._kl_divergence_fn
-            )(normal)
-        # Two output nodes: one for weight and one for volume.
-        # We use softplus to ensure these averages are positive.
-        mean_out = tfp.layers.DenseFlipout(
-            2,
-            activation='softplus',
-            kernel_prior_fn=prior_fn,
-            kernel_posterior_fn=posterior_fn,
-            kernel_divergence_fn=self._kl_divergence_fn
-        )(normal)
-        
-        # --- Combine heads to form the predicted totals ---
-        # Expected number of shipments = sigmoid(p) * softplus(λ)
-        expected_shipments = tf.keras.layers.Multiply(name='expected_shipments')([p, lambda_out])
-        # Predicted total (for weight and volume) = (expected shipments) * (average shipment weight/volume)
-        predicted_totals = tf.keras.layers.Multiply(name='predicted_totals')([expected_shipments, mean_out])
-        # predicted_totals will have shape (batch_size, 2): [total_weight, total_volume]
-        
-        self.model = tf.keras.Model(inputs=inputs, outputs=predicted_totals)
+        self.model = tf.keras.Model(inputs=inputs, outputs=outputs)
         self.model.compile(
             optimizer=tf.keras.optimizers.Adam(learning_rate=self.learning_rate),
-            loss='mse'
+            loss=custom_neg_log_likelihood
         )
     
     def fit(self, X, y, **kwargs):
@@ -161,7 +139,7 @@ class BayesianShipmentModel:
         """
         self.model.fit(X, y, **kwargs)
     
-    def predict(self, X, num_samples: int = 100):
+    def predict(self, X):
         """
         Generate Monte Carlo samples from the predictive distribution.
         

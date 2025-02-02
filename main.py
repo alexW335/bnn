@@ -73,11 +73,11 @@ def main():
     gen = DataGenerator(
         p_bern=np.array([0.3, 0.7]),
         lambda_s=np.array([3, 2]),
-        mu=np.array([[1, 1], [3, 3]]),
+        mu=np.array([[2, 3], [6, 5]]),
         cov=np.array([[[0.04, 0.048], [0.048, 0.09]], [[0.06, 0.07], [0.07, 0.09]]])
     )
 
-    data = gen.generate(samples_per_product=1000)
+    data = gen.generate(samples_per_product=5000)
 
     # generate faceted pairplots by product
     generate_pairplots(data)
@@ -94,12 +94,12 @@ def main():
     y = data[['weight', 'volume']].to_numpy()
 
     bsm = BayesianShipmentModel(input_dim = 2)
-    bsm.fit(X, y)
+    bsm.fit(X, y, epochs=50)
 
     print(X.shape)
     print(y.shape)
 
-    n_new = 100
+    n_new = 25
     newdata = np.tile(np.eye(2), (n_new, 1))
     
     preds = bsm.predict(newdata)
