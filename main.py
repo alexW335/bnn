@@ -90,13 +90,28 @@ def main():
     enc.fit(data[['product']])
     trans_prod = enc.transform(data[['product']])
 
-    print(trans_prod)
+    X = trans_prod.toarray()
+    y = data[['weight', 'volume']].to_numpy()
 
     bsm = BayesianShipmentModel(input_dim = 2)
-    # bsm.fit()
+    bsm.fit(X, y)
 
+    print(X.shape)
+    print(y.shape)
+
+    n_new = 100
+    newdata = np.tile(np.eye(2), (n_new, 1))
     
+    preds = bsm.predict(newdata)
+
+    learned_data = SimulatedDataSchema({
+        'product': 1-newdata[:,0],
+        'weight': preds[:,1].flatten(),
+        'volume': preds[:,1].flatten()
+    })
     
+    generate_pairplots(learned_data)
+
 
 
 

@@ -173,16 +173,10 @@ class BayesianShipmentModel:
         ----------
         X : array-like
             Input features with shape (n_samples, input_dim).
-        num_samples : int, default 100
-            The number of forward passes (samples) to draw.
         
         Returns
         -------
         samples : np.ndarray
-            An array of shape (num_samples, batch_size, 2) with predictive samples for total weight and volume.
+            An array of shape (batch_size, 2) with predictive samples for total weight and volume.
         """
-        predictions = []
-        for _ in range(num_samples):
-            preds = self.model(X, training=True)
-            predictions.append(preds)
-        return tf.stack(predictions, axis=0).numpy()
+        return self.model(X, training=True).numpy().astype(np.float64)
