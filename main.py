@@ -1,11 +1,15 @@
 import math
 import numpy as np
 import seaborn as sns
+
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
+from sklearn.preprocessing import OneHotEncoder
+
 from bnn.generator import DataGenerator
 from bnn.schemas import SimulatedDataSchema
+from bnn.models import BayesianShipmentModel
 
 def generate_pairplots(data: SimulatedDataSchema):
     # get unique products
@@ -81,6 +85,16 @@ def main():
     # generate overall pairplots
     sns.pairplot(data[['weight', 'volume']], diag_kind='hist')
     plt.show(block=True)
+
+    enc = OneHotEncoder()
+    enc.fit(data[['product']])
+    trans_prod = enc.transform(data[['product']])
+
+    print(trans_prod)
+
+    bsm = BayesianShipmentModel(input_dim = 2)
+    # bsm.fit()
+
     
     
 

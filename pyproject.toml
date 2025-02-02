@@ -7,10 +7,18 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.10.0",
     "mypy>=1.14.1",
-    "numpy>=2.2.2",
+    "numpy==1.26.4",
     "pandas>=2.2.3",
     "pandas-stubs>=2.2.3.241126",
     "pandera>=0.22.1",
     "pymc>=5.15.0",
+    "scikit-learn>=1.6.1",
     "seaborn>=0.13.2",
+    "tensorflow>=2.14.0",
+    "tensorflow-probability==0.22.1",
+]
+
+[tool.uv]
+override-dependencies = [
+    "tensorflow-io-gcs-filesystem; sys_platform == 'never'",
 ]
